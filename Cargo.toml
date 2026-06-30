@@ -1,0 +1,59 @@
+[package]
+name = "kvm-share"
+version = "0.1.0"
+edition = "2021"
+description = "Keyboard, mouse & clipboard sharing — no terminal, no lag, no dependencies"
+
+[dependencies]
+# ── Async runtime ─────────────────────────────────────────────────────────────
+tokio = { version = "1", features = ["full"] }
+
+# ── Input capture (rdev::grab intercepts events before the OS sees them) ──────
+# `serialize` feature enables serde on Key / Button / EventType
+rdev = { version = "0.5", features = ["serialize", "unstable_grab"] }
+
+# ── Input injection (send keyboard/mouse events to the OS) ───────────────────
+enigo = "0.2"
+
+# ── Clipboard ─────────────────────────────────────────────────────────────────
+arboard = "3"
+
+# ── System tray ───────────────────────────────────────────────────────────────
+tray-icon = "0.19"
+
+# ── Protocol serialization — compact binary, ~5-10 bytes per event ───────────
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+
+# ── Config file (human-readable JSON on disk) ────────────────────────────────
+serde_json = "1"
+
+# ── Config directory (~/.config/kvm-share/) ──────────────────────────────────
+dirs = "5"
+
+# ── Icon ─────────────────────────────────────────────────────────────────────
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log = "0.4"
+env_logger = "0.11"
+
+# ── Linux: GTK event loop required for tray-icon ─────────────────────────────
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18" }
+
+# ── Windows: Win32 message pump for tray context menu ────────────────────────
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
+
+[[bin]]
+name = "kvm-share"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
