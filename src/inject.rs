@@ -104,15 +104,18 @@ fn entry_position(from_edge: u8, pos_frac: f32, sw: u64, sh: u64) -> (i32, i32) 
     let sh = sh as f32;
     let frac = pos_frac.clamp(0.0, 1.0);
 
+    // Place 80px inward from the edge so the cursor doesn't immediately
+    // trigger the return-edge threshold on the receiving machine.
+    const INSET: i32 = 80;
     match from_edge {
         // Cursor came from server's Right → enters our Left edge
-        EDGE_RIGHT => (2, (sh * frac) as i32),
+        EDGE_RIGHT  => (INSET, (sh * frac) as i32),
         // Cursor came from server's Left  → enters our Right edge
-        EDGE_LEFT  => (sw as i32 - 2, (sh * frac) as i32),
+        EDGE_LEFT   => (sw as i32 - INSET, (sh * frac) as i32),
         // Cursor came from server's Bottom → enters our Top edge
-        EDGE_BOTTOM => ((sw * frac) as i32, 2),
+        EDGE_BOTTOM => ((sw * frac) as i32, INSET),
         // Cursor came from server's Top   → enters our Bottom edge
-        EDGE_TOP    => ((sw * frac) as i32, sh as i32 - 2),
+        EDGE_TOP    => ((sw * frac) as i32, sh as i32 - INSET),
         _           => (sw as i32 / 2, sh as i32 / 2),
     }
 }

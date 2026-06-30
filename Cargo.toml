@@ -42,11 +42,14 @@ env_logger = "0.11"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18" }
 
-# ── Windows: Win32 message pump for tray context menu ────────────────────────
+# ── Windows: Win32 message pump, Raw Input API ───────────────────────────────
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
 ] }
 
 [[bin]]

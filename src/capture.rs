@@ -79,9 +79,15 @@ fn run_grab(
     );
 
     // rdev::grab requires Fn (not FnMut) — Cell gives interior mutability.
-    let prev_x     = Cell::new(vx + vw / 2.0);
-    let prev_y     = Cell::new(vy + vh / 2.0);
-    let was_remote = Cell::new(false);
+    let prev_x          = Cell::new(vx + vw / 2.0);
+    let prev_y          = Cell::new(vy + vh / 2.0);
+    let was_remote      = Cell::new(false);
+    let prev_being_ctrl = Cell::new(false);
+    // Debounce: skip return-edge check for N events after entering being_ctrl.
+    // inject.rs places the cursor near the return edge; without this the very
+    // first injected move event fires ReturnControl instantly → CursorLeave →
+    // remote_mode=false on controller → infinite enter/leave loop.
+    let debounce_count  = Cell::new(0u32);
 
     let result = grab(move |event: Event| -> Option<Event> {
         let in_remote  = mode.load(Ordering::Relaxed);
@@ -94,6 +100,12 @@ fn run_grab(
             was_remote.set(false);
         }
 
+        // Detect being_ctrl false→true transition: arm debounce counter.
+        if being_ctrl && !prev_being_ctrl.get() {
+            debounce_count.set(40);
+        }
+        prev_being_ctrl.set(being_ctrl);
+
         match &event.event_type {
             // ── Mouse movement ────────────────────────────────────────────────
             EventType::MouseMove { x, y } => {
@@ -101,21 +113,35 @@ fn run_grab(
 
                 // ── Controlling remote ────────────────────────────────────────
                 if in_remote {
-                    let dx = cx - prev_x.get();
-                    let dy = cy - prev_y.get();
-                    prev_x.set(cx);
-                    prev_y.set(cy);
-                    if dx != 0.0 || dy != 0.0 {
-                        let _ = tx.try_send(CaptureMsg::Event(
-                            NetEvent::MouseMove { dx, dy },
-                        ));
+                    // Windows: Raw Input (tray.rs WM_INPUT handler) provides
+                    // true hardware deltas independent of cursor position.
+                    // Just suppress here — don't try to compute deltas from
+                    // LLMHF absolute coords, which are clamped to screen bounds
+                    // and give zero/tiny deltas when cursor is frozen at edge.
+                    #[cfg(not(windows))]
+                    {
+                        // Non-Windows: cursor isn't clamped the same way;
+                        // use the "frozen anchor" approach.
+                        // prev_x/prev_y are set at entry and NEVER updated,
+                        // so cx = anchor + hardware_delta → dx = hardware_delta.
+                        let dx = cx - prev_x.get();
+                        let dy = cy - prev_y.get();
+                        if dx != 0.0 || dy != 0.0 {
+                            let _ = tx.try_send(CaptureMsg::Event(
+                                NetEvent::MouseMove { dx, dy },
+                            ));
+                        }
                     }
                     return None;
                 }
 
                 // ── Being controlled — watch for return edge ──────────────────
                 if being_ctrl {
-                    if check_edge(ret_edge, cx, cy, vx, vy, vw, vh, threshold) {
+                    let dc = debounce_count.get();
+                    if dc > 0 {
+                        // Still in debounce window — don't check return edge yet.
+                        debounce_count.set(dc - 1);
+                    } else if check_edge(ret_edge, cx, cy, vx, vy, vw, vh, threshold) {
                         let pos_frac = edge_frac(ret_edge, cx, cy, vx, vy, vw, vh);
                         let _ = tx.try_send(CaptureMsg::ReturnControl {
                             edge: ret_edge,
