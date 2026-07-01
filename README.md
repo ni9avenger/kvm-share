@@ -8,7 +8,34 @@ Move your cursor to the edge of the screen and it crosses to the next machine, c
 
 ## Quick Start
 
-### 1. Use
+### 1. Download
+
+Grab the latest `kvm-share.exe` from [Releases](../../releases). No installer. No runtime. Drop it anywhere and run it.
+
+### 2. Configure
+
+On first run, KVM Share creates `kvm-share.json` next to the executable:
+
+```json
+{
+  "peer_ip": "192.168.1.42",
+  "switch_edge": "Right",
+  "edge_threshold": 10
+}
+```
+
+Set `peer_ip` to the IP of the other machine. Set `switch_edge` to which edge your second screen sits behind. Both machines run the same binary.
+
+### 3. Run
+
+Double-click `kvm-share.exe`. It lives in the system tray — no terminal window.
+
+**Tray menu:**
+- **Start / Stop** — toggle sharing
+- **Debug Window** — real-time log for diagnostics
+- **Quit**
+
+### 4. Use
 
 Move your cursor to the configured edge. It crosses to the other machine. Move it back to the opposite edge to return. Press **Scroll Lock** at any time to force-release control.
 
@@ -176,6 +203,12 @@ PRs welcome. Before opening one:
 1. `cargo fmt` and `cargo clippy -- -D warnings`
 2. Test on a real two-machine setup — edge behaviour cannot be unit-tested without hardware
 3. For new platform injection: mirror the 80 px `INSET` logic in `inject.rs`
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ---
 
