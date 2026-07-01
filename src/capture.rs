@@ -37,10 +37,16 @@ use std::sync::{
 pub enum CaptureMsg {
     Event(NetEvent),
     /// Our cursor left the screen — we're now controlling the remote machine.
-    EnterRemote { edge: u8, pos_frac: f32 },
+    EnterRemote {
+        edge: u8,
+        pos_frac: f32,
+    },
     /// Cursor reached the return edge — signal the coordinator to send CursorLeave
     /// back to whoever is currently controlling us.
-    ReturnControl { edge: u8, pos_frac: f32 },
+    ReturnControl {
+        edge: u8,
+        pos_frac: f32,
+    },
     /// ScrollLock pressed — unconditional release of whichever mode is active.
     ForceRelease,
 }
@@ -79,20 +85,20 @@ fn run_grab(
     );
 
     // rdev::grab requires Fn (not FnMut) — Cell gives interior mutability.
-    let prev_x          = Cell::new(vx + vw / 2.0);
-    let prev_y          = Cell::new(vy + vh / 2.0);
-    let was_remote      = Cell::new(false);
+    let prev_x = Cell::new(vx + vw / 2.0);
+    let prev_y = Cell::new(vy + vh / 2.0);
+    let was_remote = Cell::new(false);
     let prev_being_ctrl = Cell::new(false);
     // Debounce: skip return-edge check for N events after entering being_ctrl.
     // inject.rs places the cursor near the return edge; without this the very
     // first injected move event fires ReturnControl instantly → CursorLeave →
     // remote_mode=false on controller → infinite enter/leave loop.
-    let debounce_count  = Cell::new(0u32);
+    let debounce_count = Cell::new(0u32);
 
     let result = grab(move |event: Event| -> Option<Event> {
-        let in_remote  = mode.load(Ordering::Relaxed);
+        let in_remote = mode.load(Ordering::Relaxed);
         let being_ctrl = being_controlled.load(Ordering::Relaxed);
-        let ret_edge   = return_edge.load(Ordering::Relaxed);
+        let ret_edge = return_edge.load(Ordering::Relaxed);
 
         // Detect remote→local transition and restore cursor visibility.
         if was_remote.get() && !in_remote {
@@ -106,6 +112,7 @@ fn run_grab(
         }
         prev_being_ctrl.set(being_ctrl);
 
+        // WH_MOUSE path - rdev::grab intercepts the MouseMove event
         match &event.event_type {
             // ── Mouse movement ────────────────────────────────────────────────
             EventType::MouseMove { x, y } => {
@@ -127,9 +134,7 @@ fn run_grab(
                         let dx = cx - prev_x.get();
                         let dy = cy - prev_y.get();
                         if dx != 0.0 || dy != 0.0 {
-                            let _ = tx.try_send(CaptureMsg::Event(
-                                NetEvent::MouseMove { dx, dy },
-                            ));
+                            let _ = tx.try_send(CaptureMsg::Event(NetEvent::MouseMove { dx, dy }));
                         }
                     }
                     return None;
@@ -178,18 +183,20 @@ fn run_grab(
             // ── Mouse buttons ─────────────────────────────────────────────────
             EventType::ButtonPress(button) => {
                 if in_remote {
-                    let _ = tx.try_send(CaptureMsg::Event(
-                        NetEvent::MouseButton { button: *button, pressed: true },
-                    ));
+                    let _ = tx.try_send(CaptureMsg::Event(NetEvent::MouseButton {
+                        button: *button,
+                        pressed: true,
+                    }));
                     return None;
                 }
                 Some(event)
             }
             EventType::ButtonRelease(button) => {
                 if in_remote {
-                    let _ = tx.try_send(CaptureMsg::Event(
-                        NetEvent::MouseButton { button: *button, pressed: false },
-                    ));
+                    let _ = tx.try_send(CaptureMsg::Event(NetEvent::MouseButton {
+                        button: *button,
+                        pressed: false,
+                    }));
                     return None;
                 }
                 Some(event)
@@ -198,9 +205,10 @@ fn run_grab(
             // ── Scroll ────────────────────────────────────────────────────────
             EventType::Wheel { delta_x, delta_y } => {
                 if in_remote {
-                    let _ = tx.try_send(CaptureMsg::Event(
-                        NetEvent::MouseScroll { dx: *delta_x, dy: *delta_y },
-                    ));
+                    let _ = tx.try_send(CaptureMsg::Event(NetEvent::MouseScroll {
+                        dx: *delta_x,
+                        dy: *delta_y,
+                    }));
                     return None;
                 }
                 Some(event)
@@ -221,9 +229,10 @@ fn run_grab(
                     return None;
                 }
                 if in_remote {
-                    let _ = tx.try_send(CaptureMsg::Event(
-                        NetEvent::Key { key: *key, pressed: true },
-                    ));
+                    let _ = tx.try_send(CaptureMsg::Event(NetEvent::Key {
+                        key: *key,
+                        pressed: true,
+                    }));
                     return None;
                 }
                 Some(event)
@@ -233,9 +242,10 @@ fn run_grab(
                     return None;
                 }
                 if in_remote {
-                    let _ = tx.try_send(CaptureMsg::Event(
-                        NetEvent::Key { key: *key, pressed: false },
-                    ));
+                    let _ = tx.try_send(CaptureMsg::Event(NetEvent::Key {
+                        key: *key,
+                        pressed: false,
+                    }));
                     return None;
                 }
                 Some(event)
@@ -253,25 +263,32 @@ fn run_grab(
 // ── Edge helpers ──────────────────────────────────────────────────────────────
 
 /// Returns true if the cursor (cx, cy) is within `threshold` of the named edge.
-fn check_edge(edge: u8, cx: f64, cy: f64,
-              vx: f64, vy: f64, vw: f64, vh: f64, threshold: f64) -> bool {
+fn check_edge(
+    edge: u8,
+    cx: f64,
+    cy: f64,
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
+    threshold: f64,
+) -> bool {
     match edge {
-        EDGE_LEFT   => cx <= vx + threshold,
-        EDGE_RIGHT  => cx >= vx + vw - threshold,
-        EDGE_TOP    => cy <= vy + threshold,
+        EDGE_LEFT => cx <= vx + threshold,
+        EDGE_RIGHT => cx >= vx + vw - threshold,
+        EDGE_TOP => cy <= vy + threshold,
         EDGE_BOTTOM => cy >= vy + vh - threshold,
-        _           => false,
+        _ => false,
     }
 }
 
 /// Fractional position (0.0–1.0) along the edge — used for cursor placement
 /// on the remote screen.
-fn edge_frac(edge: u8, cx: f64, cy: f64,
-             vx: f64, vy: f64, vw: f64, vh: f64) -> f32 {
+fn edge_frac(edge: u8, cx: f64, cy: f64, vx: f64, vy: f64, vw: f64, vh: f64) -> f32 {
     (match edge {
-        EDGE_LEFT | EDGE_RIGHT   => (cy - vy) / vh,
-        EDGE_TOP  | EDGE_BOTTOM  => (cx - vx) / vw,
-        _                        => 0.5,
+        EDGE_LEFT | EDGE_RIGHT => (cy - vy) / vh,
+        EDGE_TOP | EDGE_BOTTOM => (cx - vx) / vw,
+        _ => 0.5,
     } as f32)
         .clamp(0.0, 1.0)
 }
@@ -285,9 +302,8 @@ fn screen_bounds() -> (f64, f64, f64, f64) {
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics,
-            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
         };
         let x = GetSystemMetrics(SM_XVIRTUALSCREEN) as f64;
         let y = GetSystemMetrics(SM_YVIRTUALSCREEN) as f64;
