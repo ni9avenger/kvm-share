@@ -233,6 +233,93 @@ fn rdev_key_to_enigo(key: &RdevKey) -> Option<Key> {
         RdevKey::Dot        => Some(Key::Unicode('.')),
         RdevKey::Slash      => Some(Key::Unicode('/')),
 
+        // ── Numpad ───────────────────────────────────────────────────────────
+        // enigo 0.2 has no dedicated numpad Key variants — every Kp* key fell
+        // through to the wildcard `_ => None` below and was silently dropped,
+        // which is why the numpad did nothing on the remote machine.
+        //
+        // Key::Other(u32) is documented as "on Windows, this will result in a
+        // Virtual_Key" — i.e. it's passed straight to SendInput as a real VK
+        // code, so Windows interprets it exactly like a physical numpad key
+        // (digit vs. navigation) based on the *remote* machine's own Num Lock
+        // state, matching real hardware behaviour.
+        #[cfg(windows)]
+        RdevKey::Kp0 => Some(Key::Other(0x60)), // VK_NUMPAD0
+        #[cfg(windows)]
+        RdevKey::Kp1 => Some(Key::Other(0x61)),
+        #[cfg(windows)]
+        RdevKey::Kp2 => Some(Key::Other(0x62)),
+        #[cfg(windows)]
+        RdevKey::Kp3 => Some(Key::Other(0x63)),
+        #[cfg(windows)]
+        RdevKey::Kp4 => Some(Key::Other(0x64)),
+        #[cfg(windows)]
+        RdevKey::Kp5 => Some(Key::Other(0x65)),
+        #[cfg(windows)]
+        RdevKey::Kp6 => Some(Key::Other(0x66)),
+        #[cfg(windows)]
+        RdevKey::Kp7 => Some(Key::Other(0x67)),
+        #[cfg(windows)]
+        RdevKey::Kp8 => Some(Key::Other(0x68)),
+        #[cfg(windows)]
+        RdevKey::Kp9 => Some(Key::Other(0x69)),
+        #[cfg(windows)]
+        RdevKey::KpMultiply => Some(Key::Other(0x6A)), // VK_MULTIPLY
+        #[cfg(windows)]
+        RdevKey::KpMinus    => Some(Key::Other(0x6D)), // VK_SUBTRACT
+        #[cfg(windows)]
+        RdevKey::KpPlus     => Some(Key::Other(0x6B)), // VK_ADD
+        #[cfg(windows)]
+        RdevKey::KpDelete   => Some(Key::Other(0x6E)), // VK_DECIMAL ('.' or Del, per Num Lock)
+        #[cfg(windows)]
+        RdevKey::KpDivide   => Some(Key::Other(0x6F)), // VK_DIVIDE
+
+        // rdev's own docs: "on Windows KpReturn does not exist, it's strictly
+        // equivalent to Return" — rdev never emits KpReturn on Windows, so
+        // this arm only matters on Linux/macOS.
+        RdevKey::KpReturn => Some(Key::Return),
+
+        // Num Lock toggle itself was also unmapped — without forwarding it,
+        // the two machines' Num Lock state can drift out of sync, which
+        // looks like "the numpad sends the wrong thing" even once the keys
+        // above are mapped.
+        RdevKey::NumLock => Some(Key::Numlock),
+
+        // Non-Windows fallback: enigo's Key::Other has a different meaning
+        // per platform (X11 keysym / macOS keycode), so rather than guessing
+        // those codes, send plain characters. This won't respect Num Lock
+        // state on those platforms, but it's still functional.
+        #[cfg(not(windows))]
+        RdevKey::Kp0 => Some(Key::Unicode('0')),
+        #[cfg(not(windows))]
+        RdevKey::Kp1 => Some(Key::Unicode('1')),
+        #[cfg(not(windows))]
+        RdevKey::Kp2 => Some(Key::Unicode('2')),
+        #[cfg(not(windows))]
+        RdevKey::Kp3 => Some(Key::Unicode('3')),
+        #[cfg(not(windows))]
+        RdevKey::Kp4 => Some(Key::Unicode('4')),
+        #[cfg(not(windows))]
+        RdevKey::Kp5 => Some(Key::Unicode('5')),
+        #[cfg(not(windows))]
+        RdevKey::Kp6 => Some(Key::Unicode('6')),
+        #[cfg(not(windows))]
+        RdevKey::Kp7 => Some(Key::Unicode('7')),
+        #[cfg(not(windows))]
+        RdevKey::Kp8 => Some(Key::Unicode('8')),
+        #[cfg(not(windows))]
+        RdevKey::Kp9 => Some(Key::Unicode('9')),
+        #[cfg(not(windows))]
+        RdevKey::KpMultiply => Some(Key::Unicode('*')),
+        #[cfg(not(windows))]
+        RdevKey::KpMinus    => Some(Key::Unicode('-')),
+        #[cfg(not(windows))]
+        RdevKey::KpPlus     => Some(Key::Unicode('+')),
+        #[cfg(not(windows))]
+        RdevKey::KpDelete   => Some(Key::Unicode('.')),
+        #[cfg(not(windows))]
+        RdevKey::KpDivide   => Some(Key::Unicode('/')),
+
         // ── Unknown ──────────────────────────────────────────────────────────
         RdevKey::Unknown(code) => {
             debug!("inject: unmapped key code {code}");
