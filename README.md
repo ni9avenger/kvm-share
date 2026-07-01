@@ -14,15 +14,19 @@ Grab the latest `kvm-share.exe` from [Releases](../../releases). No installer. N
 
 ### 2. Configure
 
-On first run, KVM Share creates `kvm-share.json` next to the executable:
+On first run, KVM Share creates `config.json` in `%APPDATA%\kvm-share\`:
 
 ```json
 {
   "peer_ip": "192.168.1.42",
+  "input_port": 4242,
+  "clipboard_port": 4243,
   "switch_edge": "Right",
-  "edge_threshold": 10
+  "edge_threshold": 1
 }
 ```
+
+All five fields must be present — the config struct has no defaults for missing keys, so an incomplete file silently fails to parse and falls back to a fresh default config (including a blank `peer_ip`).
 
 Set `peer_ip` to the IP of the other machine. Set `switch_edge` to which edge your second screen sits behind. Both machines run the same binary.
 
@@ -88,9 +92,11 @@ The cursor is placed 80 px inward from the entry edge on arrival. A 40-event deb
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `peer_ip` | string | `""` | IP address of the other machine |
+| `peer_ip` | string or `null` | `null` | IP address of the other machine |
+| `input_port` | integer | `4242` | UDP port for mouse/keyboard events |
+| `clipboard_port` | integer | `4243` | TCP port for clipboard sync |
 | `switch_edge` | string | `"Right"` | Trigger edge: `Left` / `Right` / `Top` / `Bottom` |
-| `edge_threshold` | integer | `10` | Pixels from edge to trigger (raise if accidental triggers) |
+| `edge_threshold` | integer | `3` | Pixels from edge to trigger (raise if accidental triggers) |
 
 ---
 
