@@ -1,0 +1,22 @@
+# Normalize line endings: repo stores LF, Windows working tree gets CRLF.
+# Prevents whole-file CRLF churn diffs from editors that save CRLF.
+* text=auto
+
+*.rs    text diff=rust
+*.toml  text
+*.md    text
+*.json  text
+*.lock  text
+*.yml   text
+*.yaml  text
+LICENSE text
+
+# Windows-only scripts keep CRLF
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+
+# Binaries — never touch
+*.png   binary
+*.ico   binary
+*.exe   binary
