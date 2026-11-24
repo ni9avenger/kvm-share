@@ -3,7 +3,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// `#[serde(default)]`: a hand-edited file missing a key falls back to that key's
+// default instead of failing to parse and silently resetting the whole config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// IP address of the remote machine (set via tray)
     pub peer_ip: Option<String>,
