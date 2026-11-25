@@ -55,6 +55,7 @@ pub fn start(
     config: Config,
     being_controlled: Arc<AtomicBool>,
     return_edge: Arc<AtomicU8>,
+    peer_ready: Arc<AtomicBool>,
 ) -> (mpsc::Receiver<CaptureMsg>, Arc<AtomicBool>) {
     let (tx, rx) = mpsc::sync_channel::<CaptureMsg>(512);
     let remote_mode = Arc::new(AtomicBool::new(false));
@@ -62,7 +63,7 @@ pub fn start(
 
     std::thread::Builder::new()
         .name("capture".into())
-        .spawn(move || run_grab(config, tx, mode_flag, being_controlled, return_edge))
+        .spawn(move || run_grab(config, tx, mode_flag, being_controlled, return_edge, peer_ready))
         .expect("capture thread");
 
     (rx, remote_mode)
@@ -74,6 +75,7 @@ fn run_grab(
     mode: Arc<AtomicBool>,
     being_controlled: Arc<AtomicBool>,
     return_edge: Arc<AtomicU8>,
+    peer_ready: Arc<AtomicBool>,
 ) {
     let (vx, vy, vw, vh) = screen_bounds();
     let threshold = config.edge_threshold as f64;
@@ -160,8 +162,14 @@ fn run_grab(
                 }
 
                 // ── Local mode — watch for switch edge ────────────────────────
+                // Only cross when the peer is connected and authenticated
+                // (set by the coordinator). Checked here, in the callback, for
+                // the same reason remote_mode is set here (invariant §6.4):
+                // no async round-trip between the decision and the event.
                 let sw_edge = switch_edge.as_u8();
-                if check_edge(sw_edge, cx, cy, vx, vy, vw, vh, threshold) {
+                if peer_ready.load(Ordering::Relaxed)
+                    && check_edge(sw_edge, cx, cy, vx, vy, vw, vh, threshold)
+                {
                     let pos_frac = edge_frac(sw_edge, cx, cy, vx, vy, vw, vh);
                     mode.store(true, Ordering::Relaxed);
                     was_remote.set(true);
@@ -344,5 +352,47 @@ pub fn show_cursor() {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::ShowCursor;
         while ShowCursor(1) < 0 {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::opposite_edge;
+
+    // HP's real desk from the 2026-11-24 diagnostic log: two monitors,
+    // primary not leftmost, so the origin is negative (invariant 6.3).
+    const VX: f64 = -1920.0;
+    const VY: f64 = -126.0;
+    const VW: f64 = 3840.0;
+    const VH: f64 = 1206.0;
+
+    #[test]
+    fn edges_use_full_virtual_desktop() {
+        let t = 5.0;
+        // Right edge is at x = 1919, not at the seam between the monitors.
+        assert!(check_edge(EDGE_RIGHT, 1919.0, 300.0, VX, VY, VW, VH, t));
+        assert!(!check_edge(EDGE_RIGHT, -1.0, 300.0, VX, VY, VW, VH, t));
+        assert!(check_edge(EDGE_LEFT, -1920.0, 300.0, VX, VY, VW, VH, t));
+        assert!(!check_edge(EDGE_LEFT, 0.0, 300.0, VX, VY, VW, VH, t));
+        assert!(check_edge(EDGE_TOP, 10.0, -126.0, VX, VY, VW, VH, t));
+        assert!(check_edge(EDGE_BOTTOM, 10.0, 1079.0, VX, VY, VW, VH, t));
+        assert!(!check_edge(9, 0.0, 0.0, VX, VY, VW, VH, t));
+    }
+
+    #[test]
+    fn edge_fraction_is_clamped() {
+        assert!((edge_frac(EDGE_RIGHT, 1919.0, -126.0, VX, VY, VW, VH) - 0.0).abs() < 1e-6);
+        assert!((edge_frac(EDGE_TOP, 0.0, -126.0, VX, VY, VW, VH) - 0.5).abs() < 1e-6);
+        assert_eq!(edge_frac(EDGE_LEFT, 0.0, 99_999.0, VX, VY, VW, VH), 1.0);
+        assert_eq!(edge_frac(EDGE_LEFT, 0.0, -99_999.0, VX, VY, VW, VH), 0.0);
+    }
+
+    #[test]
+    fn opposite_edges() {
+        assert_eq!(opposite_edge(EDGE_LEFT), EDGE_RIGHT);
+        assert_eq!(opposite_edge(EDGE_RIGHT), EDGE_LEFT);
+        assert_eq!(opposite_edge(EDGE_TOP), EDGE_BOTTOM);
+        assert_eq!(opposite_edge(EDGE_BOTTOM), EDGE_TOP);
     }
 }

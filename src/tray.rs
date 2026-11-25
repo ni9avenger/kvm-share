@@ -32,30 +32,61 @@ use tokio::sync::mpsc::Sender;
 
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.png");
 
+/// Tray → coordinator.
+pub enum TrayCmd {
+    Reload(Config),
+    PairStart,
+    PairConfirm,
+    PairCancel,
+    Unpair,
+}
+
+/// Coordinator → tray. Pairing has no text entry on purpose: both PCs show
+/// the same code and the owner confirms on each (numeric comparison), which
+/// works from a plain menu until the Phase 4 settings window exists.
+pub struct TrayUpdate {
+    pub status: String,
+    pub pairing: bool,
+    pub paired: bool,
+}
+
 pub fn run(
     mut cfg: Config,
-    peer_tx: Sender<Option<String>>,
+    cmd_tx: Sender<TrayCmd>,
+    updates: std::sync::mpsc::Receiver<TrayUpdate>,
     remote_mode: Arc<AtomicBool>,
     raw_tx: std::sync::mpsc::SyncSender<(f64, f64)>,
 ) {
     let icon = load_icon();
 
     // ── Menu items ────────────────────────────────────────────────────────
-    let title_item   = MenuItem::new("KVM Share",                 false, None);
+    let title = format!("KVM Share v{}", env!("CARGO_PKG_VERSION"));
+    let title_item   = MenuItem::new(title,                       false, None);
+    let status_item  = MenuItem::new("Starting…",                 false, None);
     let peer_label   = MenuItem::new(peer_display(&cfg),          false, None);
+    let pair_item    = MenuItem::new(pair_display(&cfg),          cfg.peer_ip.is_some(), None);
+    let confirm_item = MenuItem::new("Confirm pairing (codes match)", false, None);
+    let cancel_item  = MenuItem::new("Cancel pairing",            false, None);
+    let unpair_item  = MenuItem::new("Unpair",                    cfg.pairing.is_some(), None);
     let edge_label   = MenuItem::new(edge_display(&cfg),          false, None);
-    let cycle_edge   = MenuItem::new("Cycle switch edge",         true,  None);
+    let cycle_edge   = MenuItem::new("Cycle switch edge (restart to apply)", true, None);
     let release_hint = MenuItem::new("Release: press ScrollLock", false, None);
     let edit_cfg     = MenuItem::new("Edit config file…",         true,  None);
     let reload_cfg   = MenuItem::new("Reload config",             true,  None);
+    let logs_item    = MenuItem::new("Open log folder",           true,  None);
     let debug_item   = MenuItem::new("Debug Window",              true,  None);
     let quit_item    = MenuItem::new("Quit",                      true,  None);
 
     let tray_menu = Menu::new();
     tray_menu.append_items(&[
         &title_item,
+        &status_item,
         &PredefinedMenuItem::separator(),
         &peer_label,
+        &pair_item,
+        &confirm_item,
+        &cancel_item,
+        &unpair_item,
         &PredefinedMenuItem::separator(),
         &edge_label,
         &cycle_edge,
@@ -64,12 +95,13 @@ pub fn run(
         &PredefinedMenuItem::separator(),
         &edit_cfg,
         &reload_cfg,
+        &logs_item,
         &debug_item,
         &PredefinedMenuItem::separator(),
         &quit_item,
     ]).unwrap();
 
-    let _tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_tooltip("KVM Share — right-click to configure")
         .with_icon(icon)
@@ -82,7 +114,7 @@ pub fn run(
     // ── Windows: set up Raw Input on this thread ──────────────────────────
     #[cfg(target_os = "windows")]
     {
-        match win32::create_raw_input_window() {
+        match win32::create_raw_input_window(remote_mode.clone(), raw_tx.clone()) {
             Some(hwnd) => {
                 if win32::register_raw_input(hwnd) {
                     info!("raw input: registered successfully");
@@ -128,9 +160,28 @@ pub fn run(
             if id == reload_cfg.id() {
                 cfg = Config::load();
                 peer_label.set_text(peer_display(&cfg));
+                pair_item.set_text(pair_display(&cfg));
                 edge_label.set_text(edge_display(&cfg));
-                let _ = peer_tx.blocking_send(cfg.peer_ip.clone());
+                let _ = cmd_tx.blocking_send(TrayCmd::Reload(cfg.clone()));
                 info!("config reloaded: peer={:?} edge={:?}", cfg.peer_ip, cfg.switch_edge);
+            }
+
+            if id == pair_item.id() {
+                let _ = cmd_tx.blocking_send(TrayCmd::PairStart);
+            }
+            if id == confirm_item.id() {
+                let _ = cmd_tx.blocking_send(TrayCmd::PairConfirm);
+                confirm_item.set_enabled(false);
+            }
+            if id == cancel_item.id() {
+                let _ = cmd_tx.blocking_send(TrayCmd::PairCancel);
+            }
+            if id == unpair_item.id() {
+                let _ = cmd_tx.blocking_send(TrayCmd::Unpair);
+            }
+
+            if id == logs_item.id() {
+                open_log_folder();
             }
 
             if id == debug_item.id() {
@@ -142,11 +193,25 @@ pub fn run(
             }
         }
 
+        // ── Coordinator status → menu ──────────────────────────────────────
+        if let Some(u) = updates.try_iter().last() {
+            status_item.set_text(format!("Status: {}", u.status));
+            let _ = tray.set_tooltip(Some(format!("KVM Share — {}", u.status)));
+            confirm_item.set_enabled(u.pairing);
+            cancel_item.set_enabled(u.pairing);
+            pair_item.set_enabled(!u.pairing);
+            unpair_item.set_enabled(u.paired && !u.pairing);
+            // The coordinator may have adopted a new peer IP or saved a pairing.
+            cfg = Config::load();
+            peer_label.set_text(peer_display(&cfg));
+            pair_item.set_text(pair_display(&cfg));
+        }
+
         while TrayIconEvent::receiver().try_recv().is_ok() {}
 
         // ── Platform message pumps ─────────────────────────────────────────
         #[cfg(target_os = "windows")]
-        win32::pump_messages(&remote_mode, &raw_tx);
+        win32::pump_messages();
 
         #[cfg(target_os = "linux")]
         while gtk::events_pending() {
@@ -168,6 +233,23 @@ fn peer_display(cfg: &Config) -> String {
 
 fn edge_display(cfg: &Config) -> String {
     format!("Switch edge: {:?}", cfg.switch_edge)
+}
+
+fn pair_display(cfg: &Config) -> String {
+    match (&cfg.peer_ip, &cfg.pairing) {
+        (Some(ip), Some(_)) => format!("Pair again with {ip}…"),
+        (Some(ip), None)    => format!("Pair with {ip}…"),
+        (None, _)           => "Pair… (set peer_ip in config first)".into(),
+    }
+}
+
+fn open_log_folder() {
+    let dir = crate::logging::log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(target_os = "windows")]
+    { let _ = std::process::Command::new("explorer").arg(&dir).spawn(); }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = std::process::Command::new("xdg-open").arg(&dir).spawn(); }
 }
 
 fn load_icon() -> tray_icon::Icon {
@@ -203,7 +285,7 @@ fn open_config_in_editor() {
 mod win32 {
     use log::debug;
     use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
-    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::{
         GetRawInputData, RegisterRawInputDevices,
@@ -221,9 +303,27 @@ mod win32 {
     /// Bit 0 of RAWMOUSE.usFlags: 1 = absolute, 0 = relative
     const MOUSE_ABSOLUTE: u16  = 1;
 
+    type RawSink = (Arc<AtomicBool>, std::sync::mpsc::SyncSender<(f64, f64)>);
+
+    thread_local! {
+        /// Where the window procedure sends deltas. Thread-local because the
+        /// window procedure always runs on the thread that created the window.
+        static RAW_SINK: std::cell::RefCell<Option<RawSink>> = const { std::cell::RefCell::new(None) };
+    }
+
     /// Create a message-only hidden window on the current thread.
     /// WM_INPUT messages from Raw Input are delivered to this window.
-    pub fn create_raw_input_window() -> Option<HWND> {
+    ///
+    /// WM_INPUT is handled in the window procedure, not in `pump_messages`:
+    /// while the tray menu is open, TrackPopupMenu runs its own modal loop
+    /// on this thread, and our pump never sees the messages. Deltas were
+    /// lost and the cursor stuck on the peer (two-PC test, 2026-11-24).
+    /// Every modal loop still dispatches to the window procedure.
+    pub fn create_raw_input_window(
+        remote_mode: Arc<AtomicBool>,
+        raw_tx: std::sync::mpsc::SyncSender<(f64, f64)>,
+    ) -> Option<HWND> {
+        RAW_SINK.with(|s| *s.borrow_mut() = Some((remote_mode, raw_tx)));
         unsafe {
             let hinstance = GetModuleHandleW(std::ptr::null());
             let class_name: Vec<u16> = "KvmShareRawInput\0".encode_utf16().collect();
@@ -231,7 +331,7 @@ mod win32 {
             let wc = WNDCLASSEXW {
                 cbSize:        std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style:         0,
-                lpfnWndProc:   Some(DefWindowProcW),
+                lpfnWndProc:   Some(raw_input_wnd_proc),
                 cbClsExtra:    0,
                 cbWndExtra:    0,
                 hInstance:     hinstance,
@@ -316,40 +416,45 @@ mod win32 {
         }
     }
 
-    /// Drain the Win32 message queue.
-    /// Intercepts WM_INPUT for remote-mode mouse movement; passes everything
-    /// else to DefWindowProc (handles tray icon, menu, etc.).
-    pub fn pump_messages(
-        remote_mode: &Arc<AtomicBool>,
-        raw_tx: &std::sync::mpsc::SyncSender<(f64, f64)>,
-    ) {
+    /// Window procedure of the raw-input window: forwards remote-mode deltas,
+    /// then lets DefWindowProc do the WM_INPUT cleanup Windows expects.
+    unsafe extern "system" fn raw_input_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         use std::sync::atomic::AtomicU64;
         static WM_INPUT_COUNT: AtomicU64 = AtomicU64::new(0);
 
+        if msg == WM_INPUT {
+            RAW_SINK.with(|s| {
+                let Some((remote_mode, raw_tx)) = &*s.borrow() else { return };
+                let in_remote = remote_mode.load(Ordering::Relaxed);
+                let n = WM_INPUT_COUNT.fetch_add(1, Ordering::Relaxed);
+
+                if let Some((dx, dy)) = read_raw_delta(lp) {
+                    // Log every 20th event to show data is flowing
+                    if n % 20 == 0 || n < 5 {
+                        crate::debug_window::log(format!(
+                            "WM_INPUT #{n}  remote={in_remote}  dx={dx:.1} dy={dy:.1}"
+                        ));
+                    }
+                    if in_remote {
+                        let _ = raw_tx.try_send((dx, dy));
+                    }
+                } else if n < 5 {
+                    // Log early failures (absolute mouse, size=0, etc.)
+                    crate::debug_window::log(format!(
+                        "WM_INPUT #{n}  remote={in_remote}  (no delta / absolute device)"
+                    ));
+                }
+            });
+        }
+        DefWindowProcW(hwnd, msg, wp, lp)
+    }
+
+    /// Drain the Win32 message queue. WM_INPUT is handled by
+    /// `raw_input_wnd_proc` when dispatched, here or in a modal loop.
+    pub fn pump_messages() {
         unsafe {
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) != 0 {
-                if msg.message == WM_INPUT {
-                    let in_remote = remote_mode.load(Ordering::Relaxed);
-                    let n = WM_INPUT_COUNT.fetch_add(1, Ordering::Relaxed);
-
-                    if let Some((dx, dy)) = read_raw_delta(msg.lParam) {
-                        // Log every 20th event to show data is flowing
-                        if n % 20 == 0 || n < 5 {
-                            crate::debug_window::log(format!(
-                                "WM_INPUT #{n}  remote={in_remote}  dx={dx:.1} dy={dy:.1}"
-                            ));
-                        }
-                        if in_remote {
-                            let _ = raw_tx.try_send((dx, dy));
-                        }
-                    } else if n < 5 {
-                        // Log early failures (absolute mouse, size=0, etc.)
-                        crate::debug_window::log(format!(
-                            "WM_INPUT #{n}  remote={in_remote}  (no delta / absolute device)"
-                        ));
-                    }
-                }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }

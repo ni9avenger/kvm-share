@@ -1,8 +1,8 @@
 // protocol.rs — wire format for all events between the two machines.
 //
-// Transport:
-//   Input events  →  UDP port 4242  (fire-and-forget, ~5–15 bytes each)
-//   Clipboard     →  TCP port 4243  (length-prefixed UTF-8, reliable)
+// Transport (v2 — packaging and signing live in wire.rs):
+//   Input events  →  UDP port 4252  (fire-and-forget, signed datagrams)
+//   Clipboard     →  TCP port 4253  (control channel, signed frames)
 //
 // Why UDP for input?
 //   A dropped mouse-move packet doesn't matter — the next one arrives in <1 ms.
@@ -55,17 +55,5 @@ pub fn opposite_edge(edge: u8) -> u8 {
         EDGE_TOP    => EDGE_BOTTOM,
         EDGE_BOTTOM => EDGE_TOP,
         _           => edge,
-    }
-}
-
-impl NetEvent {
-    /// Serialize to bytes for UDP transmission.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap_or_default()
-    }
-
-    /// Deserialize from a received UDP datagram.
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        bincode::deserialize(data).ok()
     }
 }

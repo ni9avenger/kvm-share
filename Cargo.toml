@@ -1,6 +1,6 @@
 [package]
 name = "kvm-share"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Keyboard, mouse & clipboard sharing — no terminal, no lag, no dependencies"
 
@@ -35,8 +35,14 @@ dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # ── Logging ──────────────────────────────────────────────────────────────────
-log = "0.4"
-env_logger = "0.11"
+log = { version = "0.4", features = ["std"] }
+
+# ── Pairing + packet signing (see crypto.rs) ─────────────────────────────────
+# Audited primitives instead of hand-rolled ones. Randomness and at-rest key
+# protection come from Windows (BCryptGenRandom, DPAPI) via windows-sys.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 # ── Linux: GTK event loop required for tray-icon ─────────────────────────────
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -50,6 +56,7 @@ windows-sys = { version = "0.52", features = [
     "Win32_UI_Input",
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
+    "Win32_Security_Cryptography",
 ] }
 
 [[bin]]

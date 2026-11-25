@@ -1,159 +1,200 @@
-// net.rs — networking layer
+// net.rs — UDP input channel (protocol v2).
 //
-// Two channels:
+//   UDP port 4252 — input events (mouse/keyboard), signed.
+//     Fire-and-forget: a dropped mouse-move doesn't matter, the next arrives
+//     immediately. TCP would queue stale events behind a lost one.
 //
-//   UDP port 4242  — input events (mouse/keyboard)
-//     Both machines bind a UDP socket and send/receive to each other's IP.
-//     Fire-and-forget: a dropped mouse-move doesn't matter, the next arrives immediately.
+// v2 changes:
+//   - Every datagram is signed with a key derived from the pairing key and
+//     the sender's session id (wire.rs). Unsigned, wrongly-signed, replayed,
+//     or v0.1.x datagrams are dropped before anything is injected.
+//   - The receiver only accepts the session id the peer announced over the
+//     authenticated control channel, so replays from an earlier run fail.
+//   - The sender follows a watch of the peer address, so an IP change takes
+//     effect on the next packet (v0.1.x kept the startup address, §7.1).
 //
-//   TCP port 4243  — clipboard sync
-//     Length-prefixed UTF-8 payload. Both machines run a server + client.
-//     Protocol: [4 bytes u32-LE length][N bytes UTF-8 text]
+// Clipboard moved to the control channel (control.rs).
 
 use crate::protocol::NetEvent;
+use crate::wire::{self, ReplayWindow};
 use log::{debug, info, warn};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, SocketAddr};
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{sleep, Duration};
+use tokio::sync::watch;
 
 const UDP_BUF: usize = 4096;
-const MAX_CLIPBOARD_BYTES: usize = 10 * 1024 * 1024; // 10 MB
-const RECONNECT_MS: u64 = 2_000;
 
 // ── UDP input sender ─────────────────────────────────────────────────────────
 
-/// Receive NetEvents from the capture layer and send them over UDP to the peer.
-pub async fn run_udp_sender(mut rx: Receiver<NetEvent>, peer_addr: String) {
+pub struct UdpOut {
+    pub port: u16,
+    pub session: u32,
+    pub peer: watch::Receiver<Option<IpAddr>>,
+    pub key: watch::Receiver<Option<[u8; 32]>>,
+}
+
+/// Sign NetEvents from the capture layer and send them to the current peer.
+pub async fn run_udp_sender(mut rx: Receiver<NetEvent>, mut out: UdpOut) {
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
-        Err(e) => { warn!("udp sender: bind failed: {e}"); return; }
+        Err(e) => {
+            warn!("udp sender: bind failed: {e}");
+            return;
+        }
     };
+    info!("udp sender: ready (session {:08x})", out.session);
 
-    info!("udp sender: sending to {peer_addr}");
+    let mut seq: u64 = 0;
+    let mut udp_key: Option<[u8; 32]> = None;
+    let mut key_seen = false;
 
-    loop {
-        match rx.recv().await {
-            Some(event) => {
-                let bytes = event.to_bytes();
-                if let Err(e) = socket.send_to(&bytes, &peer_addr).await {
-                    debug!("udp sender: {e}");
-                }
-            }
-            None => break,
+    while let Some(event) = rx.recv().await {
+        if !key_seen || out.key.has_changed().unwrap_or(false) {
+            udp_key = out.key.borrow_and_update().map(|k| wire::udp_key(&k, out.session));
+            key_seen = true;
+        }
+        let (Some(k), Some(ip)) = (udp_key.as_ref(), *out.peer.borrow()) else {
+            continue; // not paired / no peer: nothing to send to
+        };
+        seq += 1;
+        let pkt = wire::seal_udp(k, out.session, seq, &event);
+        if let Err(e) = socket.send_to(&pkt, SocketAddr::new(ip, out.port)).await {
+            debug!("udp sender: {e}");
         }
     }
 }
 
 // ── UDP input receiver ────────────────────────────────────────────────────────
 
-/// Listen for incoming NetEvents from the peer and forward to the inject layer.
-/// Includes the sender's SocketAddr so the coordinator can learn the peer's IP
-/// automatically (needed for the auto-return path when being controlled).
-pub async fn run_udp_receiver(tx: Sender<(NetEvent, std::net::SocketAddr)>, bind_addr: String) {
-    let socket = match UdpSocket::bind(&bind_addr).await {
+pub struct UdpIn {
+    pub bind: String,
+    pub key: watch::Receiver<Option<[u8; 32]>>,
+    /// Session the authenticated peer announced; None = accept nothing.
+    pub accepted: watch::Receiver<Option<u32>>,
+}
+
+/// Verify incoming datagrams and forward them, with the sender's address, to
+/// the coordinator.
+pub async fn run_udp_receiver(tx: Sender<(NetEvent, SocketAddr)>, inp: UdpIn) {
+    let socket = match UdpSocket::bind(&inp.bind).await {
         Ok(s) => s,
-        Err(e) => { warn!("udp receiver: bind failed on {bind_addr}: {e}"); return; }
+        Err(e) => {
+            warn!("udp receiver: bind failed on {}: {e}", inp.bind);
+            return;
+        }
     };
+    info!("udp receiver: listening on {}", inp.bind);
+    receive_loop(socket, tx, inp).await;
+}
 
-    info!("udp receiver: listening on {bind_addr}");
+async fn receive_loop(socket: UdpSocket, tx: Sender<(NetEvent, SocketAddr)>, inp: UdpIn) {
     let mut buf = vec![0u8; UDP_BUF];
+    // (session, derived key) cache and the replay window for that session.
+    let mut cached: Option<(u32, [u8; 32], [u8; 32])> = None;
+    let mut window = ReplayWindow::default();
+    let mut rejected: u64 = 0;
 
     loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, from)) => {
-                if let Some(event) = NetEvent::from_bytes(&buf[..len]) {
-                    let _ = tx.send((event, from)).await;
-                }
-            }
-            Err(e) => debug!("udp receiver: {e}"),
-        }
-    }
-}
-
-// ── TCP clipboard server ──────────────────────────────────────────────────────
-
-/// Accept clipboard payloads from a peer and forward to the clipboard layer.
-pub async fn run_clipboard_server(tx: Sender<String>, bind_addr: String) {
-    let listener = match TcpListener::bind(&bind_addr).await {
-        Ok(l) => l,
-        Err(e) => { warn!("clipboard server: bind failed on {bind_addr}: {e}"); return; }
-    };
-
-    info!("clipboard server: listening on {bind_addr}");
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                info!("clipboard: peer connected from {peer}");
-                let tx2 = tx.clone();
-                tokio::spawn(handle_clipboard_recv(stream, tx2));
-            }
-            Err(e) => warn!("clipboard server: accept error: {e}"),
-        }
-    }
-}
-
-async fn handle_clipboard_recv(mut stream: TcpStream, tx: Sender<String>) {
-    loop {
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).await.is_err() {
-            debug!("clipboard: peer disconnected");
-            break;
-        }
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        if len > MAX_CLIPBOARD_BYTES {
-            warn!("clipboard: payload too large ({len} bytes), dropping connection");
-            break;
-        }
-
-        let mut payload = vec![0u8; len];
-        if stream.read_exact(&mut payload).await.is_err() {
-            break;
-        }
-
-        match String::from_utf8(payload) {
-            Ok(text) => { let _ = tx.send(text).await; }
-            Err(e) => warn!("clipboard: non-UTF8 payload: {e}"),
-        }
-    }
-}
-
-// ── TCP clipboard client ──────────────────────────────────────────────────────
-
-/// Connect to the peer's clipboard server and send local clipboard changes.
-/// Reconnects automatically on disconnect.
-pub async fn run_clipboard_client(mut rx: Receiver<String>, peer_addr: String) {
-    loop {
-        info!("clipboard client: connecting to {peer_addr}");
-        match TcpStream::connect(&peer_addr).await {
-            Ok(mut stream) => {
-                info!("clipboard client: connected");
-                loop {
-                    match rx.recv().await {
-                        Some(text) => {
-                            if let Err(e) = send_clipboard_payload(&mut stream, &text).await {
-                                debug!("clipboard client: send error: {e}");
-                                break; // reconnect
-                            }
-                            debug!("clipboard client: sent {} chars", text.len());
-                        }
-                        None => return, // channel closed, shut down
-                    }
-                }
-            }
+        let (len, from) = match socket.recv_from(&mut buf).await {
+            Ok(x) => x,
             Err(e) => {
-                debug!("clipboard client: could not connect to {peer_addr}: {e}");
-                sleep(Duration::from_millis(RECONNECT_MS)).await;
+                // Windows reports ICMP "port unreachable" from earlier sends
+                // as a recv error on UDP sockets; it is harmless.
+                debug!("udp receiver: {e}");
+                continue;
             }
+        };
+        let data = &buf[..len];
+        let accepted = *inp.accepted.borrow();
+        let pair_key = *inp.key.borrow();
+        let (Some(session), Some(pair_key), Some(hdr)) = (accepted, pair_key, wire::peek_udp(data)) else {
+            rejected += 1;
+            if rejected.is_power_of_two() {
+                debug!("udp receiver: dropped {rejected} unauthenticated datagram(s), last from {from}");
+            }
+            continue;
+        };
+        if hdr.session != session {
+            rejected += 1;
+            continue;
+        }
+        let key = match cached {
+            Some((s, pk, k)) if s == session && pk == pair_key => k,
+            _ => {
+                let k = wire::udp_key(&pair_key, session);
+                cached = Some((session, pair_key, k));
+                window = ReplayWindow::default();
+                k
+            }
+        };
+        let Some(event) = wire::open_udp(&key, data) else {
+            rejected += 1;
+            continue;
+        };
+        if !window.accept(hdr.seq) {
+            continue; // replay or too old
+        }
+        if tx.send((event, from)).await.is_err() {
+            break;
         }
     }
 }
 
-async fn send_clipboard_payload(stream: &mut TcpStream, text: &str) -> tokio::io::Result<()> {
-    let bytes = text.as_bytes();
-    stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
-    stream.write_all(bytes).await?;
-    stream.flush().await
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn signed_datagrams_only() {
+        let pair_key = [5u8; 32];
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = sock.local_addr().unwrap().port();
+        let (_k_tx, key) = watch::channel(Some(pair_key));
+        let (acc_tx, accepted) = watch::channel(Some(77u32));
+        let (tx, mut rx) = mpsc::channel(16);
+        tokio::spawn(receive_loop(sock, tx, UdpIn { bind: String::new(), key, accepted }));
+
+        let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let k = wire::udp_key(&pair_key, 77);
+        let ev = NetEvent::Key { key: rdev::Key::KeyA, pressed: true };
+        let good = wire::seal_udp(&k, 77, 1, &ev);
+        let dest = ("127.0.0.1", port);
+
+        s.send_to(&bincode::serialize(&ev).unwrap(), dest).await.unwrap(); // v0.1.x style
+        s.send_to(&wire::seal_udp(&wire::udp_key(&[6u8; 32], 77), 77, 1, &ev), dest).await.unwrap(); // wrong key
+        s.send_to(&wire::seal_udp(&wire::udp_key(&pair_key, 78), 78, 1, &ev), dest).await.unwrap(); // wrong session
+        s.send_to(&good, dest).await.unwrap();
+        s.send_to(&good, dest).await.unwrap(); // replay
+
+        let got = timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(got.0, NetEvent::Key { pressed: true, .. }));
+        assert!(timeout(Duration::from_millis(300), rx.recv()).await.is_err(), "only one datagram may pass");
+
+        // Peer gone (session cleared) → nothing accepted.
+        acc_tx.send_replace(None);
+        s.send_to(&wire::seal_udp(&k, 77, 2, &ev), dest).await.unwrap();
+        assert!(timeout(Duration::from_millis(300), rx.recv()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sender_follows_peer_address() {
+        let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = a.local_addr().unwrap().port();
+        let (_kt, key) = watch::channel(Some([1u8; 32]));
+        let (peer_tx, peer) = watch::channel(None);
+        let (tx, rx) = mpsc::channel(8);
+        tokio::spawn(run_udp_sender(rx, UdpOut { port, session: 3, peer, key }));
+
+        tx.send(NetEvent::Ping).await.unwrap(); // no peer yet → dropped
+        peer_tx.send_replace(Some("127.0.0.1".parse().unwrap()));
+        tx.send(NetEvent::Ping).await.unwrap();
+        let mut buf = [0u8; 256];
+        let (n, _) = timeout(Duration::from_secs(2), a.recv_from(&mut buf)).await.unwrap().unwrap();
+        let h = wire::peek_udp(&buf[..n]).unwrap();
+        assert_eq!(h.session, 3);
+        assert_eq!(h.seq, 1, "the packet sent before a peer existed must not consume a sequence number");
+    }
 }
